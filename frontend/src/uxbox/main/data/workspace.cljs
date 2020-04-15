@@ -40,6 +40,8 @@
    [uxbox.util.transit :as t]
    [uxbox.common.uuid :as uuid]
    [uxbox.util.webapi :as wapi]
+   [uxbox.main.data.workspace.transforms :as transforms]
+   [uxbox.main.data.workspace.common :refer [IBatchedChange IUpdateGroup] :as common]
    #_[vendor.randomcolor])
   (:import goog.events.EventType
            goog.events.KeyCodes
@@ -52,16 +54,10 @@
 ;; --- Specs
 
 (s/def ::shape-attrs ::cp/shape-attrs)
-(s/def ::set-of-uuid
-  (s/every uuid? :kind set?))
 
 ;; --- Expose inner functions
 
 (defn interrupt? [e] (= e :interrupt))
-
-;; --- Protocols
-
-(defprotocol IBatchedChange)
 
 ;; --- Declarations
 
@@ -73,7 +69,36 @@
 (declare handle-pointer-send)
 (declare handle-page-change)
 (declare shapes-changes-commited)
-(declare commit-changes)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Exports
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Common
+
+(def rehash-shape-frame-relationship common/rehash-shape-frame-relationship)
+(def commit-changes common/commit-changes)
+(def materialize-undo common/materialize-undo)
+(def diff-and-commit-changes common/diff-and-commit-changes)
+(def calculate-frame-overlap common/calculate-frame-overlap)
+
+;; Transform
+
+(def start-rotate transforms/start-rotate)
+(def start-resize transforms/start-resize)
+(def start-move-selected transforms/start-move-selected)
+(def start-move-frame transforms/start-move-frame)
+(def move-selected transforms/move-selected)
+
+(def assoc-resize-modifier-in-bulk transforms/assoc-resize-modifier-in-bulk)
+(def apply-displacement-in-bulk transforms/apply-displacement-in-bulk)
+(def apply-frame-displacement transforms/apply-frame-displacement)
+(def apply-rotation transforms/apply-rotation)
+(def materialize-resize-modifier-in-bulk transforms/materialize-resize-modifier-in-bulk)
+(def materialize-displacement-in-bulk transforms/materialize-displacement-in-bulk)
+(def materialize-frame-displacement transforms/materialize-frame-displacement)
+(def materialize-rotation transforms/materialize-rotation)
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Workspace WebSocket
@@ -187,49 +212,6 @@
 ;; Undo/Redo
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(def MAX-UNDO-SIZE 50)
-
-(defn- conj-undo-entry
-  [undo data]
-  (let [undo (conj undo data)]
-    (if (> (count undo) MAX-UNDO-SIZE)
-      (into [] (take MAX-UNDO-SIZE undo))
-      undo)))
-
-(defn- materialize-undo
-  [changes index]
-  (ptk/reify ::materialize-undo
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)]
-        (-> state
-            (update-in [:workspace-data page-id] cp/process-changes changes)
-            (assoc-in [:workspace-local :undo-index] index))))))
-
-(defn- reset-undo
-  [index]
-  (ptk/reify ::reset-undo
-    ptk/UpdateEvent
-    (update [_ state]
-      (-> state
-          (update :workspace-local dissoc :undo-index)
-          (update-in [:workspace-local :undo]
-                     (fn [queue]
-                       (into [] (take (inc index) queue))))))))
-
-(s/def ::undo-changes ::cp/changes)
-(s/def ::redo-changes ::cp/changes)
-(s/def ::undo-entry
-  (s/keys :req-un [::undo-changes ::redo-changes]))
-
-(defn- append-undo
-  [entry]
-  (us/verify ::undo-entry entry)
-  (ptk/reify ::append-undo
-    ptk/UpdateEvent
-    (update [_ state]
-      (update-in state [:workspace-local :undo] (fnil conj-undo-entry []) entry))))
-
 (def undo
   (ptk/reify ::undo
     ptk/WatchEvent
@@ -338,8 +320,8 @@
       (let [file (get-in state [:files file-id])]
         (assoc state :workspace-file file)))))
 
-(declare diff-and-commit-changes)
 (declare initialize-page-persistence)
+(declare initialize-group-check)
 
 (defn initialize-page
   [page-id]
@@ -350,14 +332,53 @@
             data (get-in state [:pages-data page-id])
             local (get-in state [:workspace-cache page-id] workspace-default)]
         (-> state
-            (assoc ::page-id page-id)   ; mainly used by events
+            (assoc :page-id page-id)   ; mainly used by events
             (assoc :workspace-local local)
             (assoc :workspace-page page)
             (assoc-in [:workspace-data page-id] data))))
 
     ptk/WatchEvent
     (watch [_ state stream]
-      (rx/of (initialize-page-persistence page-id)))))
+      (rx/of (initialize-page-persistence page-id)
+             (initialize-group-check)))))
+
+(declare adjust-group-shapes)
+
+(defn initialize-group-check []
+  (ptk/reify ::initialize-group-check
+    ptk/WatchEvent
+    (watch [_ state stream]
+      (->> stream
+           (rx/filter #(satisfies? IUpdateGroup %))
+           (rx/map #(adjust-group-shapes (common/get-ids %)))))))
+
+(defn adjust-group-shapes
+  [ids]
+  (ptk/reify ::adjust-group-shapes
+    IBatchedChange
+    
+    ptk/UpdateEvent
+    (update [_ state]
+      (let [page-id (:page-id state)
+            objects (get-in state [:workspace-data page-id :objects])
+            groups-to-adjust (->> ids
+                                  (mapcat #(reverse (helpers/get-all-parents % objects)))
+                                  (map #(get objects %))
+                                  (filter #(= (:type %) :group))
+                                  (map #(:id %))
+                                  distinct)
+
+            update-group
+            (fn [state group]
+              (let [objects (get-in state [:workspace-data page-id :objects])
+                    group-objects (map #(get objects %) (:shapes group))
+                    selrect (geom/selection-rect group-objects)]
+                (merge group (select-keys selrect [:x :y :width :height]))))
+
+            reduce-fn
+            #(update-in %1 [:workspace-data page-id :objects %2] (partial update-group %1))]
+
+        (reduce reduce-fn state groups-to-adjust)))))
 
 (defn finalize
   [project-id file-id page-id]
@@ -376,14 +397,13 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (declare persist-changes)
-(declare diff-and-commit-changes)
 
 (defn initialize-page-persistence
   [page-id]
   (ptk/reify ::initialize-persistence
     ptk/UpdateEvent
     (update [_ state]
-      (assoc state ::page-id page-id))
+      (assoc state :page-id page-id))
 
     ptk/WatchEvent
     (watch [_ state stream]
@@ -426,58 +446,6 @@
         (->> (rp/mutation :update-page params)
              (rx/map shapes-changes-commited))))))
 
-
-(defn- generate-operations
-  [ma mb]
-  (let [ma-keys (set (keys ma))
-        mb-keys (set (keys mb))
-        added (set/difference mb-keys ma-keys)
-        removed (set/difference ma-keys mb-keys)
-        both (set/intersection ma-keys mb-keys)]
-    (d/concat
-     (mapv #(array-map :type :set :attr % :val (get mb %)) added)
-     (mapv #(array-map :type :set :attr % :val nil) removed)
-     (loop [k (first both)
-            r (rest both)
-            rs []]
-       (if k
-         (let [vma (get ma k)
-               vmb (get mb k)]
-           (if (= vma vmb)
-             (recur (first r) (rest r) rs)
-             (recur (first r) (rest r) (conj rs {:type :set
-                                                 :attr k
-                                                 :val vmb}))))
-         rs)))))
-
-(defn- generate-changes
-  [prev curr]
-  (letfn [(impl-diff [res id]
-            (let [prev-obj (get-in prev [:objects id])
-                  curr-obj (get-in curr [:objects id])
-                  ops (generate-operations (dissoc prev-obj :shapes :frame-id)
-                                           (dissoc curr-obj :shapes :frame-id))]
-              (if (empty? ops)
-                res
-                (conj res {:type :mod-obj
-                           :operations ops
-                           :id id}))))]
-    (reduce impl-diff [] (set/union (set (keys (:objects prev)))
-                                    (set (keys (:objects curr)))))))
-
-(defn diff-and-commit-changes
-  [page-id]
-  (ptk/reify ::diff-and-commit-changes
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [page-id (::page-id state)
-            curr (get-in state [:workspace-data page-id])
-            prev (get-in state [:pages-data page-id])
-
-            changes (generate-changes prev curr)
-            undo-changes (generate-changes curr prev)]
-        (when-not (empty? changes)
-          (rx/of (commit-changes changes undo-changes)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Data Fetching & Uploading
@@ -955,32 +923,16 @@
   "Add a shape to the current workspace page, inside a given frame.
   Give it a name that is unique in the page"
   [state {:keys [id frame-id] :as data}]
-  (let [page-id (::page-id state)
+  (let [page-id (:page-id state)
         objects (get-in state [:workspace-data page-id :objects])
         name (impl-generate-unique-name objects (:name data))
         shape (assoc data :name name)
-        page-id (::page-id state)]
+        page-id (:page-id state)]
     (-> state
         (update-in [:workspace-data page-id :objects frame-id :shapes] conj id)
         (update-in [:workspace-data page-id :objects] assoc id shape))))
 
 (declare select-shape)
-
-(defn- calculate-frame-overlap
-  [objects shape]
-  (let [rshp (geom/shape->rect-shape shape)
-
-        xfmt (comp
-              (filter #(= :frame (:type %)))
-              (filter #(not= (:id shape) (:id %)))
-              (filter #(not= uuid/zero (:id %)))
-              (filter #(geom/overlaps? % rshp)))
-
-        frame (->> (vals objects)
-                   (sequence xfmt)
-                   (first))]
-
-    (or (:id frame) uuid/zero)))
 
 (defn add-shape
   [attrs]
@@ -989,7 +941,7 @@
     (ptk/reify ::add-shape
       ptk/UpdateEvent
       (update [_ state]
-        (let [page-id  (::page-id state)
+        (let [page-id  (:page-id state)
               objects  (get-in state [:workspace-data page-id :objects])
               shape    (-> (geom/setup-proportions attrs)
                            (assoc :id id))
@@ -1001,7 +953,7 @@
 
       ptk/WatchEvent
       (watch [_ state stream]
-        (let [page-id (::page-id state)
+        (let [page-id (:page-id state)
               obj (get-in state [:workspace-data page-id :objects id])]
           (rx/of (commit-changes [{:type :add-obj
                                    :id id
@@ -1024,7 +976,7 @@
 
       ptk/WatchEvent
       (watch [_ state stream]
-        (let [page-id (::page-id state)
+        (let [page-id (:page-id state)
               obj (get-in state [:workspace-data page-id :objects id])]
           (rx/of (commit-changes [{:type :add-obj
                                    :id id
@@ -1042,7 +994,7 @@
   (ptk/reify ::duplicate-shapes
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             rchanges (mapv (fn [id]
                              (let [obj (assoc (get objects id)
@@ -1065,7 +1017,7 @@
   (ptk/reify ::duplicate-frame
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
 
             frame (get objects frame-id)
@@ -1108,7 +1060,7 @@
   (ptk/reify ::duplicate-selected
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             selected (get-in state [:workspace-local :selected])
             lookup #(get objects %)
@@ -1171,7 +1123,7 @@
   [state selrect]
   (let [zoom (gpt/point (get-in state [:workspace-local :zoom]))
         selrect' (geom/apply-zoom selrect zoom)
-        page-id (::page-id state)
+        page-id (:page-id state)
         data (get-in state [:workspace-data page-id])
         match (fn [acc {:keys [type id] :as shape}]
                 (cond
@@ -1192,7 +1144,7 @@
                  (remove #(= :frame (:type %)))
                  (remove #(= uuid/zero (:id %)))
                  (map geom/shape->rect-shape)
-                 (map geom/resolve-rotation)
+                 (map geom/resolve-transformation)
                  (map geom/shape->rect-shape))]
 
     (transduce xf match #{} (vals (:objects data)))))
@@ -1210,7 +1162,7 @@
   (ptk/reify ::select-inside-group
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             group (get objects group-id)
             children (map #(get objects %) (:shapes group))
@@ -1226,9 +1178,12 @@
   (us/verify ::shape-attrs attrs)
   (ptk/reify ::update-shape
     IBatchedChange
+    IUpdateGroup
+    (get-ids [_] [id])
+
     ptk/UpdateEvent
     (update [_ state]
-      (let [pid (::page-id state)]
+      (let [pid (:page-id state)]
         (update-in state [:workspace-data pid :objects id] merge attrs)))))
 
 ;; --- Update Page Options
@@ -1240,7 +1195,7 @@
     IBatchedChange
     ptk/UpdateEvent
     (update [_ state]
-      (let [pid (::page-id state)]
+      (let [pid (:page-id state)]
         (update-in state [:workspace-data pid :options] merge opts)))))
 
 ;; --- Update Selected Shapes attrs
@@ -1258,54 +1213,9 @@
 
 (declare initial-selection-align)
 
-(defn- get-displacement-with-grid
-  "Retrieve the correct displacement delta point for the
-  provided direction speed and distances thresholds."
-  [shape direction options]
-  (let [grid-x (:grid-x options 10)
-        grid-y (:grid-y options 10)
-        x-mod (mod (:x shape) grid-x)
-        y-mod (mod (:y shape) grid-y)]
-    (case direction
-      :up (gpt/point 0 (- (if (zero? y-mod) grid-y y-mod)))
-      :down (gpt/point 0 (- grid-y y-mod))
-      :left (gpt/point (- (if (zero? x-mod) grid-x x-mod)) 0)
-      :right (gpt/point (- grid-x x-mod) 0))))
-
-(defn- get-displacement
-  "Retrieve the correct displacement delta point for the
-  provided direction speed and distances thresholds."
-  [shape direction]
-  (case direction
-    :up (gpt/point 0 (- 1))
-    :down (gpt/point 0 1)
-    :left (gpt/point (- 1) 0)
-    :right (gpt/point 1 0)))
-
 (s/def ::direction #{:up :down :right :left})
 (s/def ::loc  #{:up :down :bottom :top})
 
-(declare apply-displacement-in-bulk)
-(declare materialize-displacement-in-bulk)
-
-(defn move-selected
-  [direction align?]
-  (us/verify ::direction direction)
-  (us/verify boolean? align?)
-
-  (ptk/reify ::move-selected
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [pid (::page-id state)
-            selected (get-in state [:workspace-local :selected])
-            options (get-in state [:workspace-data pid :options])
-            shapes (map #(get-in state [:workspace-data pid :objects %]) selected)
-            shape (geom/shapes->rect-shape shapes)
-            displacement (if align?
-                           (get-displacement-with-grid shape direction options)
-                           (get-displacement shape direction))]
-        (rx/of (apply-displacement-in-bulk selected displacement)
-               (materialize-displacement-in-bulk selected))))))
 
 ;; --- Delete Selected
 
@@ -1315,7 +1225,7 @@
   (ptk/reify ::delete-shapes
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             session-id (:session-id state)
             objects (get-in state [:workspace-data page-id :objects])
             rchanges (mapv #(array-map :type :del-obj :id %) ids)
@@ -1336,7 +1246,7 @@
   (ptk/reify ::delete-shapes
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             obj (get objects id)
             ids (d/concat [] (:shapes obj) [(:id obj)])]
@@ -1347,7 +1257,7 @@
   (ptk/reify ::delete-selected
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             lookup   #(get-in state [:workspace-data page-id :objects %])
             selected (get-in state [:workspace-local :selected])
 
@@ -1375,7 +1285,7 @@
     IBatchedChange
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)]
+      (let [page-id (:page-id state)]
         (update-in state [:workspace-data page-id :objects id] assoc :name name)))))
 
 ;; --- Shape Vertical Ordering
@@ -1386,7 +1296,7 @@
   (ptk/reify ::vertical-order-selected-shpes
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             selected (seq (get-in state [:workspace-local :selected]))
 
@@ -1420,7 +1330,7 @@
   (ptk/reify ::reloacate-shape
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             selected (get-in state [:workspace-local :selected])
             objects (get-in state [:workspace-data page-id :objects])
             parent-id (helpers/get-parent ref-id objects)]
@@ -1436,7 +1346,7 @@
   (ptk/reify ::commit-shape-order-change
     ptk/WatchEvent
     (watch [_ state stream]
-      (let [pid (::page-id state)
+      (let [pid (:page-id state)
             obj (get-in state [:workspace-data pid :objects id])
 
             cfrm (get-in state [:workspace-data pid :objects (:frame-id obj)])
@@ -1466,14 +1376,19 @@
     IBatchedChange
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             selected (get-in state [:workspace-local :selected])
             moved-objs (if (= 1 (count selected))
                          (align-object-to-frame objects (first selected) axis)
                          (align-objects-list objects selected axis))
             updated-objs (merge objects (d/index-by :id moved-objs))]
-        (assoc-in state [:workspace-data page-id :objects] updated-objs)))))
+        (assoc-in state [:workspace-data page-id :objects] updated-objs)))
+
+    ptk/WatchEvent
+    (watch [_ state stream]
+      (let [selected (get-in state [:workspace-local :selected])]
+        (rx/of (adjust-group-shapes selected))))))
 
 (defn align-object-to-frame
   [objects object-id axis]
@@ -1494,7 +1409,7 @@
     IBatchedChange
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             selected (get-in state [:workspace-local :selected])
             selected-objs (map #(get objects %) selected)
@@ -1504,303 +1419,6 @@
 
 
 ;; --- Temportal displacement for Shape / Selection
-
-(defn- rehash-shape-frame-relationship
-  [ids]
-  (letfn [(impl-diff [state]
-            (loop [id  (first ids)
-                   ids (rest ids)
-                   rch []
-                   uch []]
-              (if (nil? id)
-                [rch uch]
-                (let [pid (::page-id state)
-                      objects (get-in state [:workspace-data pid :objects])
-                      obj (get objects id)
-                      fid (calculate-frame-overlap objects obj)]
-                  (if (not= fid (:frame-id obj))
-                    (recur (first ids)
-                           (rest ids)
-                           (conj rch {:type :mov-obj
-                                      :id id
-                                      :frame-id fid})
-                           (conj uch {:type :mov-obj
-                                      :id id
-                                      :frame-id (:frame-id obj)}))
-                    (recur (first ids)
-                           (rest ids)
-                           rch
-                           uch))))))]
-    (ptk/reify ::rehash-shape-frame-relationship
-      ptk/WatchEvent
-      (watch [_ state stream]
-        (let [[rch uch] (impl-diff state)]
-          (when-not (empty? rch)
-            (rx/of (commit-changes rch uch {:commit-local? true}))))))))
-
-(defn- adjust-group-shapes [state ids]
-  (let [page-id (::page-id state)
-        objects (get-in state [:workspace-data page-id :objects])
-        groups-to-adjust (->> ids
-                              (mapcat #(reverse (helpers/get-all-parents % objects)))
-                              (map #(get objects %))
-                              (filter #(= (:type %) :group))
-                              (map #(:id %))
-                              distinct)
-
-        update-group
-        (fn [state group]
-          (let [objects (get-in state [:workspace-data page-id :objects])
-                group-objects (map #(get objects %) (:shapes group))
-                selrect (geom/selection-rect group-objects)]
-            (merge group (select-keys selrect [:x :y :width :height]))))
-
-        reduce-fn
-        #(update-in %1 [:workspace-data page-id :objects %2] (partial update-group %1))]
-
-    (reduce reduce-fn state groups-to-adjust)))
-
-(defn assoc-resize-modifier-in-bulk
-  [ids xfmt]
-  (us/verify ::set-of-uuid ids)
-  (us/verify gmt/matrix? xfmt)
-  (ptk/reify ::assoc-resize-modifier-in-bulk
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)
-            rfn #(assoc-in %1 [:workspace-data page-id
-                               :objects %2 :resize-modifier] xfmt)]
-        (reduce rfn state ids)))))
-
-(defn materialize-resize-modifier-in-bulk
-  [ids]
-  (ptk/reify ::materialize-resize-modifier-in-bulk
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)
-            objects (get-in state [:workspace-data page-id :objects])
-
-            ;; Updates the resize data for a single shape
-            materialize-shape
-            (fn [state id mtx]
-              (update-in
-               state
-               [:workspace-data page-id :objects id]
-               #(-> %
-                    (dissoc :resize-modifier)
-                    (geom/transform mtx))))
-
-            ;; Applies materialize-shape over shape children
-            materialize-children
-            (fn [state id mtx]
-              (reduce #(materialize-shape %1 %2 mtx) state (helpers/get-children id objects)))
-
-            ;; For each shape makes permanent the displacemnt
-            update-shapes
-            (fn [state id]
-              (let [shape (get objects id)
-                    mtx (:resize-modifier shape (gmt/matrix))]
-                (if (= (:type shape) :frame)
-                  (materialize-shape state id mtx)
-                  (-> state
-                      (materialize-shape id mtx)
-                      (materialize-children id mtx)))))]
-
-        (as-> state $
-          (reduce update-shapes $ ids)
-          (adjust-group-shapes $ ids))))
-
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [page-id (::page-id state)]
-        (rx/of (diff-and-commit-changes page-id)
-               (rehash-shape-frame-relationship ids))))))
-
-(defn apply-displacement-in-bulk
-  "Apply the same displacement delta to all shapes identified by the set
-  if ids."
-  [ids delta]
-  (us/verify ::set-of-uuid ids)
-  (us/verify gpt/point? delta)
-  (ptk/reify ::apply-displacement-in-bulk
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)
-            rfn (fn [state id]
-                  (let [objects (get-in state [:workspace-data page-id :objects])
-                        shape   (get objects id)
-                        prev    (:displacement-modifier shape (gmt/matrix))
-                        curr    (gmt/translate prev delta)]
-                    (->> (assoc shape :displacement-modifier curr)
-                         (assoc-in state [:workspace-data page-id :objects id]))))]
-        (reduce rfn state ids)))))
-
-
-(defn materialize-displacement-in-bulk
-  [ids]
-  (ptk/reify ::materialize-displacement-in-bulk
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)
-            objects (get-in state [:workspace-data page-id :objects])
-
-            ;; Updates the displacement data for a single shape
-            materialize-shape
-            (fn [state id mtx]
-              (update-in
-               state
-               [:workspace-data page-id :objects id]
-               #(-> %
-                    (dissoc :displacement-modifier)
-                    (geom/transform mtx))))
-
-            ;; Applies materialize-shape over shape children
-            materialize-children
-            (fn [state id mtx]
-              (reduce #(materialize-shape %1 %2 mtx) state (helpers/get-children id objects)))
-
-            ;; For each shape makes permanent the resize
-            update-shapes
-            (fn [state id]
-              (let [shape (get objects id)
-                    mtx (:displacement-modifier shape (gmt/matrix))]
-                (-> state
-                    (materialize-shape id mtx)
-                    (materialize-children id mtx))))]
-
-        (as-> state $
-          (reduce update-shapes $ ids)
-          (adjust-group-shapes $ ids))))
-
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [page-id (::page-id state)]
-        (rx/of (diff-and-commit-changes page-id)
-               (rehash-shape-frame-relationship ids))))))
-
-(defn apply-frame-displacement
-  "Apply the same displacement delta to all shapes identified by the
-  set if ids."
-  [id delta]
-  (us/verify ::us/uuid id)
-  (us/verify gpt/point? delta)
-  (ptk/reify ::apply-frame-displacement
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)]
-        (update-in state [:workspace-data page-id :objects id]
-                   (fn [shape]
-                     (let [prev (:displacement-modifier shape (gmt/matrix))
-                           xfmt (gmt/translate prev delta)]
-                       (assoc shape :displacement-modifier xfmt))))))))
-
-(defn materialize-frame-displacement
-  [id]
-  (us/verify ::us/uuid id)
-  (ptk/reify ::materialize-frame-displacement
-    IBatchedChange
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (::page-id state)
-            objects (get-in state [:workspace-data page-id :objects])
-            frame   (get objects id)
-            xfmt     (or (:displacement-modifier frame) (gmt/matrix))
-
-            frame   (-> frame
-                        (dissoc :displacement-modifier)
-                        (geom/transform xfmt))
-
-            shapes  (->> (helpers/get-children id objects)
-                         (map #(get objects %))
-                         (map #(geom/transform % xfmt))
-                         (d/index-by :id))
-
-            shapes (assoc shapes (:id frame) frame)]
-        (update-in state [:workspace-data page-id :objects] merge shapes)))))
-
-
-(defn apply-rotation
-  [delta-rotation shapes]
-  (ptk/reify ::apply-rotation
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [group  (geom/selection-rect shapes)
-            group-center (gpt/center group)
-            calculate-displacement
-            (fn [shape angle]
-              (let [shape-rect (geom/shape->rect-shape shape)
-                    shape-center (gpt/center shape-rect)]
-                (-> (gmt/matrix)
-                    (gmt/rotate angle group-center)
-                    (gmt/rotate (- angle) shape-center))))
-
-            page-id (::page-id state)
-            rotate-shape
-            (fn [state shape]
-              (let [path [:workspace-data page-id :objects (:id shape)]
-                    ds (calculate-displacement shape delta-rotation)]
-                (-> state
-                    (assoc-in (conj path :rotation-modifier) delta-rotation)
-                    (assoc-in (conj path :displacement-modifier) ds))))]
-        (reduce rotate-shape state shapes)))))
-
-(defn materialize-rotation
-  [shapes]
-  (ptk/reify ::materialize-rotation
-    IBatchedChange
-
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [apply-rotation
-            (fn [shape]
-              (let [ds-modifier (or (:displacement-modifier shape) (gmt/matrix))]
-                (-> shape
-                    (update :rotation #(mod (+ % (:rotation-modifier shape)) 360))
-                    (geom/transform ds-modifier)
-                    (dissoc :rotation-modifier)
-                    (dissoc :displacement-modifier))))
-
-            materialize-shape
-            (fn [state shape]
-              (let [path [:workspace-data (::page-id state) :objects (:id shape)]]
-                (update-in state path apply-rotation)))]
-
-        (reduce materialize-shape state shapes)))))
-
-(defn commit-changes
-  ([changes undo-changes] (commit-changes changes undo-changes {}))
-  ([changes undo-changes {:keys [save-undo?
-                                 commit-local?]
-                          :or {save-undo? true
-                               commit-local? false}
-                          :as opts}]
-   (us/verify ::cp/changes changes)
-   (us/verify ::cp/changes undo-changes)
-
-   (ptk/reify ::commit-changes
-     cljs.core/IDeref
-     (-deref [_] changes)
-
-     ptk/UpdateEvent
-     (update [_ state]
-       (let [page-id (::page-id state)
-             state (update-in state [:pages-data page-id] cp/process-changes changes)]
-         (cond-> state
-           commit-local? (update-in [:workspace-data page-id] cp/process-changes changes))))
-
-     ptk/WatchEvent
-     (watch [_ state stream]
-       (let [page (:workspace-page state)
-             uidx (get-in state [:workspace-local :undo-index] ::not-found)]
-         (rx/concat
-          (when (and save-undo? (not= uidx ::not-found))
-            (rx/of (reset-undo uidx)))
-
-          (when save-undo?
-            (let [entry {:undo-changes undo-changes
-                         :redo-changes changes}]
-              (rx/of (append-undo entry))))))))))
-
 
 (s/def ::shapes-changes-commited
   (s/keys :req-un [::page-id ::revn ::cp/changes]))
@@ -1879,9 +1497,12 @@
   (us/verify ::us/number value)
   (ptk/reify ::update-rect-dimensions
     IBatchedChange
+    IUpdateGroup
+    (get-ids [_] [id])
+
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)]
+      (let [page-id (:page-id state)]
         (update-in state [:workspace-data page-id :objects id]
                    geom/resize-rect attr value)))))
 
@@ -1892,9 +1513,12 @@
   (us/verify ::us/number value)
   (ptk/reify ::update-rect-dimensions
     IBatchedChange
+    IUpdateGroup
+    (get-ids [_] [id])
+
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)]
+      (let [page-id (:page-id state)]
         (update-in state [:workspace-data page-id :objects id]
                    geom/resize-rect attr value)))))
 
@@ -1905,7 +1529,7 @@
   (ptk/reify ::toggle-shape-proportion-lock
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)
+      (let [page-id (:page-id state)
             shape (get-in state [:workspace-data page-id :objects id])]
         (if (:proportion-lock shape)
           (assoc-in state [:workspace-data page-id :objects id :proportion-lock] false)
@@ -1924,9 +1548,12 @@
   (us/verify ::us/uuid id)
   (us/verify ::position position)
   (ptk/reify ::update-position
+    IUpdateGroup
+    (get-ids [_] [id])
+
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)]
+      (let [page-id (:page-id state)]
         (update-in state [:workspace-data page-id :objects id]
                    geom/absolute-move position)))))
 
@@ -1941,7 +1568,7 @@
   (ptk/reify ::update-path
     ptk/UpdateEvent
     (update [_ state]
-      (let [page-id (::page-id state)]
+      (let [page-id (:page-id state)]
         (update-in state [:workspace-data page-id :objects id :segments index] gpt/add delta)))))
 
 ;; --- Initial Path Point Alignment
@@ -1994,7 +1621,7 @@
     ptk/UpdateEvent
     (update [_ state]
       (let [hide #(impl-update-shape-hidden %1 %2 true)
-            page-id (::page-id state)
+            page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             frame   (get objects id)]
         (reduce hide state (cons id (:shapes frame)))))))
@@ -2007,14 +1634,14 @@
     ptk/UpdateEvent
     (update [_ state]
       (let [show #(impl-update-shape-hidden %1 %2 false)
-            page-id (::page-id state)
+            page-id (:page-id state)
             objects (get-in state [:workspace-data page-id :objects])
             frame   (get objects id)]
         (reduce show state (cons id (:shapes frame)))))))
 
 (defn- impl-update-shape-hidden
   [state id hidden?]
-  (let [page-id (::page-id state)]
+  (let [page-id (:page-id state)]
     (assoc-in state [:workspace-data page-id :objects id :hidden] hidden?)))
 
 ;; --- Shape Blocking
@@ -2039,7 +1666,7 @@
 
 (defn- impl-update-shape-blocked
   [state id blocked?]
-  (let [page-id (::page-id state)
+  (let [page-id (:page-id state)
         obj (get-in state [:workspace-data page-id :objects id])
         obj (assoc obj :blocked blocked?)
         state (assoc-in state [:workspace-data page-id :objects id] obj)]
@@ -2143,7 +1770,7 @@
                :data (assoc data :selected selected)}))
 
           (prepare [result state id]
-            (let [page-id (::page-id state)
+            (let [page-id (:page-id state)
                   objects (get-in state [:workspace-data page-id :objects])
                   object  (get objects id)]
               (cond-> (assoc-in result [:objects id] object)
@@ -2173,7 +1800,7 @@
   (letfn [(prepare-changes [state delta]
             "Prepare objects to paste: generate new id, give them unique names, move
             to the position of mouse pointer, and find in what frame they fit."
-            (let [page-id (::page-id state)]
+            (let [page-id (:page-id state)]
               (loop [existing-objs (get-in state [:workspace-data page-id :objects])
                      chgs []
                      id   (first selected)
@@ -2368,16 +1995,15 @@
                        (fn [state] (assoc-in state [:workspace-local :selected] #{id})))))
             rx/empty))))))
 
-(defn remove-group
-  []
+(defn remove-group []
   (ptk/reify ::remove-group
     ptk/WatchEvent
     (watch [_ state stream]
       (let [selected (get-in state [:workspace-local :selected])
             group-id (first selected)
-            group (get-in state [:workspace-data (::page-id state) :objects group-id])]
+            group (get-in state [:workspace-data (:page-id state) :objects group-id])]
         (if (and (= (count selected) 1) (= (:type group) :group))
-          (let [objects (get-in state [:workspace-data (::page-id state) :objects])
+          (let [objects (get-in state [:workspace-data (:page-id state) :objects])
                 shapes (get-in objects [group-id :shapes])
                 parent-id (helpers/get-parent group-id objects)
                 parent (get objects parent-id)
@@ -2402,6 +2028,7 @@
                              :index index-in-parent}]]
               (rx/of (commit-changes rchanges uchanges {:commit-local? true}))))
           rx/empty)))))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Shortcuts

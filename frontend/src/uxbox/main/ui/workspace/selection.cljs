@@ -2,8 +2,8 @@
 ;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ;;
-;; Copyright (c) 2015-2020 Juan de la Cruz <delacruzgarciajuan@gmail.com>
-;; Copyright (c) 2015-2020 Andrey Antukh <niwi@niwi.nz>
+;; Copyright (c) 2015-2017 Juan de la Cruz <delacruzgarciajuan@gmail.com>
+;; Copyright (c) 2015-2019 Andrey Antukh <niwi@niwi.nz>
 
 (ns uxbox.main.ui.workspace.selection
   "Selection handlers component."
@@ -22,85 +22,6 @@
    [uxbox.util.dom :as dom]
    [uxbox.util.geom.point :as gpt]
    [uxbox.util.geom.matrix :as gmt]))
-
-(defn- apply-zoom
-  [point]
-  (gpt/divide point (gpt/point @refs/selected-zoom)))
-
-;; --- Resize & Rotate
-
-(defn- start-resize
-  [vid ids shape]
-  (letfn [(resize [shape [point lock?]]
-            (let [result (geom/resize-shape vid shape point lock?)
-                  scale (geom/calculate-scale-ratio shape result)
-                  mtx (geom/generate-resize-matrix vid shape scale)]
-              (rx/of (dw/assoc-resize-modifier-in-bulk ids mtx))))
-
-          ;; Unifies the instantaneous proportion lock modifier
-          ;; activated by Ctrl key and the shapes own proportion
-          ;; lock flag that can be activated on element options.
-          (normalize-proportion-lock [[point ctrl?]]
-            (let [proportion-lock? (:proportion-lock shape)]
-              [point (or proportion-lock? ctrl?)]))
-
-          ;; Applies alginment to point if it is currently
-          ;; activated on the current workspace
-          ;; (apply-grid-alignment [point]
-          ;;   (if @refs/selected-alignment
-          ;;     (uwrk/align-point point)
-          ;;     (rx/of point)))
-          ]
-    (reify
-      ptk/WatchEvent
-      (watch [_ state stream]
-        (let [shape  (->> (geom/shape->rect-shape shape)
-                          (geom/size))
-              stoper (rx/filter ms/mouse-up? stream)]
-          (rx/concat
-           (->> ms/mouse-position
-                (rx/map apply-zoom)
-                ;; (rx/mapcat apply-grid-alignment)
-                (rx/with-latest vector ms/mouse-position-ctrl)
-                (rx/map normalize-proportion-lock)
-                (rx/mapcat (partial resize shape))
-                (rx/take-until stoper))
-           (rx/of (dw/materialize-resize-modifier-in-bulk ids))))))))
-
-(defn start-rotate
-  [shapes]
-  (ptk/reify ::start-rotate
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [stoper (rx/filter ms/mouse-up? stream)
-            group  (geom/selection-rect shapes)
-            group-center (gpt/center group)
-            initial-angle (gpt/angle @ms/mouse-position group-center)
-            calculate-angle (fn [pos ctrl?]
-                              (let [angle (- (gpt/angle pos group-center) initial-angle)
-                                    angle (if (neg? angle) (+ 360 angle) angle)
-                                    modval (mod angle 90)
-                                    angle (if ctrl?
-                                            (if (< 50 modval)
-                                              (+ angle (- 90 modval))
-                                              (- angle modval))
-                                            angle)
-                                    angle (if (= angle 360)
-                                            0
-                                            angle)]
-                                angle))]
-        (rx/concat
-         (->> ms/mouse-position
-              (rx/map apply-zoom)
-              (rx/with-latest vector ms/mouse-position-ctrl)
-              (rx/map (fn [[pos ctrl?]]
-                        (let [delta-angle (calculate-angle pos ctrl?)]
-                          (dw/apply-rotation delta-angle shapes))))
-              
-              
-              (rx/take-until stoper))
-         (rx/of (dw/materialize-rotation shapes))
-         )))))
 
 ;; --- Controls (Component)
 
@@ -150,41 +71,44 @@
   [{:keys [shape zoom on-resize on-rotate] :as props}]
   (let [{:keys [x y width height rotation] :as shape} (geom/shape->rect-shape shape)
         radius (if (> (max width height) handler-size-threshold) 6.0 4.0)
-        transform (geom/rotation-matrix shape)
+        transform (geom/transform-matrix shape)
         
-        resize-handlers {:top          [(+ x (/ width 2 )) (- y 2)]
-                         :right        [(+ x width 1) (+ y (/ height 2))]
-                         :bottom       [(+ x (/ width 2)) (+ y height 2)]
-                         :left         [(- x 3) (+ y (/ height 2))]
+        resize-handlers {:top          [(+ x (/ width 2 )) y]
+                         :right        [(+ x width) (+ y (/ height 2))]
+                         :bottom       [(+ x (/ width 2)) (+ y height)]
+                         :left         [x (+ y (/ height 2))]
                          :top-left     [x y]
                          :top-right    [(+ x width) y]
                          :bottom-left  [x (+ y height)]
                          :bottom-right [(+ x width) (+ y height)]}]
     
-    [:g.controls {:transform transform}
-     [:rect.main {:x x :y y
+    [:g.controls
+     [:rect.main {:transform transform
+                  :x x :y y
                   :width width
                   :height height
                   :stroke-dasharray (str (/ 8.0 zoom) "," (/ 5 zoom))
+                  :vector-effect "non-scaling-stroke"
                   :style {:stroke "#1FDEA7"
                           :fill "transparent"
                           :stroke-opacity "1"}}]
 
      (for [[position [cx cy]] resize-handlers]
-       [:* {:key (str "fragment-" (name position))}
-        [:& rotation-handler {:key (str "rotation-" (name position))
-                              :cx cx
-                              :cy cy
-                              :position position
-                              :rotation (:rotation shape)
-                              :on-mouse-down on-rotate}]
+       (let [tp (gpt/transform (gpt/point cx cy) transform)]
+         [:* {:key (str "fragment-" (name position))}
+          [:& rotation-handler {:key (str "rotation-" (name position))
+                                :cx (:x tp)
+                                :cy (:y tp)
+                                :position position
+                                :rotation (:rotation shape)
+                                :on-mouse-down on-rotate}]
 
-        [:& control-item {:key (str "resize-" (name position))
-                          :class (name position)
-                          :on-click #(on-resize position %)
-                          :r (/ radius zoom)
-                          :cx cx
-                          :cy cy}]])]))
+          [:& control-item {:key (str "resize-" (name position))
+                            :class (name position)
+                            :on-click #(on-resize position %)
+                            :r (/ radius zoom)
+                            :cx (:x tp)
+                            :cy (:y tp)}]]))]))
 
 ;; --- Selection Handlers (Component)
 
@@ -240,13 +164,13 @@
                           :fill "transparent"}}]]))
 
 (mf/defc multiple-selection-handlers
-  [{:keys [shapes selected zoom] :as props}]
+  [{:keys [shapes selected zoom objects] :as props}]
   (let [shape (geom/selection-rect shapes)
         on-resize #(do (dom/stop-propagation %2)
-                       (st/emit! (start-resize %1 selected shape)))
+                       (st/emit! (dw/start-resize %1 selected shape objects)))
 
         on-rotate #(do (dom/stop-propagation %)
-                       (st/emit! (start-rotate shapes)))]
+                       (st/emit! (dw/start-rotate shapes)))]
 
     [:& controls {:shape shape
                   :zoom zoom
@@ -257,9 +181,9 @@
   [{:keys [shape zoom objects] :as props}]
   (let [shape (geom/transform-shape shape)
         on-resize #(do (dom/stop-propagation %2)
-                       (st/emit! (start-resize %1 #{(:id shape)} shape)))
+                       (st/emit! (dw/start-resize %1 #{(:id shape)} shape objects)))
         on-rotate #(do (dom/stop-propagation %)
-                       (st/emit! (start-rotate [shape])))]
+                       (st/emit! (dw/start-rotate [shape])))]
 
     [:& controls {:shape shape
                   :zoom zoom
@@ -285,6 +209,7 @@
       (> num 1)
       [:& multiple-selection-handlers {:shapes shapes
                                        :selected selected
+                                       :objects objects
                                        :zoom zoom}]
 
       (and (= type :text)
@@ -299,5 +224,5 @@
 
       :else
       [:& single-selection-handlers {:shape shape
-                                     :objects objects
-                                     :zoom zoom}])))
+                                     :zoom zoom
+                                     :objects objects}])))

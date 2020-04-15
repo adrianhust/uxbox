@@ -42,10 +42,7 @@
   [props]
   (let [shape (unchecked-get props "shape")
         {:keys [id x y width height rotation]} shape
-        center (gpt/center shape)
-        transform (when (pos? rotation)
-                    (str (-> (gmt/matrix)
-                             (gmt/rotate rotation center))))
+        transform (geom/transform-matrix shape)
         props (-> (attrs/extract-style-attrs shape)
                   (itr/obj-assign!
                    #js {:x x

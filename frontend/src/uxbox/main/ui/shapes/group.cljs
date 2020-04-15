@@ -21,7 +21,7 @@
    [uxbox.main.store :as st]
    [uxbox.main.streams :as ms]))
 
-(defonce ^:dynamic *debug* (atom false))
+(defonce ^:dynamic *debug* (atom true))
 
 (defn- equals?
   [np op]
@@ -86,26 +86,23 @@
           shape (unchecked-get props "shape")
           children (unchecked-get props "children")
           is-child-selected? (unchecked-get props "is-child-selected?")
-          {:keys [id x y width height rotation
-                  displacement-modifier
-                  resize-modifier]} shape
+          {:keys [id x y width height rotation]} shape
 
           transform (when (and rotation (pos? rotation))
                       (str/format "rotate(%s %s %s)"
                                   rotation
                                   (+ x (/ width 2))
                                   (+ y (/ height 2))))]
-      [:g {:transform transform}
+      [:g
        (for [item children]
          [:& shape-wrapper
           {:frame frame
-           :shape (cond-> item
-                    displacement-modifier (assoc :displacement-modifier displacement-modifier)
-                    resize-modifier (assoc :resize-modifier resize-modifier))
+           :shape item
            :key (:id item)}])
 
        (when (not is-child-selected?)
-         [:rect {:x x
+         [:rect {:transform transform
+                 :x x
                  :y y
                  :fill (if (deref *debug*) "red" "transparent")
                  :opacity 0.5

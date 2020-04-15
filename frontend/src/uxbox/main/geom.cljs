@@ -303,20 +303,27 @@
   and the scale factor vector. The shape should be of rect-like type.
 
   Mainly used by drawarea and shape resize on workspace."
-  [vid shape [scalex scaley]]
+  [vid shape frame [scalex scaley]]
   (let [[cor-x cor-y] (get-vid-coords vid)
         {:keys [x y width height rotation]} shape
-        cx (+ x (/ width 2))
-        cy (+ y (/ height 2))
-        center (gpt/point cx cy)
-        ]
-    (-> (gmt/matrix)
+        center (gpt/center shape)
+        frame-x (:x frame)
+        frame-y (:y frame)]
+
+    (-> #_(or (:resize-modifier shape) (gmt/matrix))
+        (gmt/matrix)
+        (gmt/scale (gpt/point scalex 1)))
+
+    #_(gmt/scale-matrix (gpt/point scalex scaley))
+    #_(-> (gmt/matrix)
         ;; Correction first otherwise the scale is going to deform the correction
-        (gmt/translate (gmt/correct-rotation
+        #_(gmt/translate (gmt/correct-rotation
                         vid width height scalex scaley rotation))
+        #_(gmt/translate (gpt/point frame-x frame-y))
         (gmt/scale (gpt/point scalex scaley)
-                   (gpt/point (cor-x shape)
-                              (cor-y shape))))))
+                   #_(gpt/point (- (cor-x shape) frame-x) (- (cor-y shape) frame-y))
+                   (gpt/point (cor-x shape) (cor-y shape)))
+        #_(gmt/translate (gpt/negate (gpt/point frame-x frame-y))))))
 
 (defn resize-shape
   "Apply a resize transformation to a rect-like shape. The shape
@@ -326,9 +333,10 @@
   Mainly used in drawarea and interactive resize on workspace
   with the main objective that on the end of resize have a way
   a calculte the resize ratio with `calculate-scale-ratio`."
-  [vid shape {:keys [x y] :as point} lock?]
+  [vid shape initial target lock?]
 
-  (let [[cor-x cor-y] (get-vid-coords vid)]
+  (let [{:keys [x y]} (gpt/subtract target initial)
+        [cor-x cor-y] (get-vid-coords vid)]
     (let [final-x (if (#{:top :bottom} vid) (:x2 shape) x)
           final-y (if (#{:right :left} vid) (:y2 shape) y)
           width (Math/abs (- final-x (cor-x shape)))
@@ -500,6 +508,7 @@
 
 (defn- transform-rect
   [{:keys [x y width height] :as shape} mx]
+  (.log js/console "TRANSFORM" (clj->js shape) (clj->js transform-rect))
   (let [tl (gpt/transform (gpt/point x y) mx)
         tr (gpt/transform (gpt/point (+ x width) y) mx)
         bl (gpt/transform (gpt/point x (+ y height)) mx)
@@ -552,16 +561,15 @@
       (and rotation (pos? rotation))
       (gmt/rotate rotation (gpt/point cx cy)))))
 
-(defn resolve-rotation
+(declare transform-matrix)
+(defn resolve-transformation
   [shape]
-  (transform shape (rotation-matrix shape)))
+  (transform shape (transform-matrix shape))
+  #_(transform shape (rotation-matrix shape)))
 
 (defn resolve-modifier
-  [{:keys [resize-modifier displacement-modifier rotation-modifier] :as shape}]
+  [{:keys [displacement-modifier rotation-modifier] :as shape}]
   (cond-> shape
-    (gmt/matrix? resize-modifier)
-    (transform resize-modifier)
-
     (gmt/matrix? displacement-modifier)
     (transform displacement-modifier)
 
@@ -577,7 +585,7 @@
   (comp (map shape->rect-shape)
         (map resolve-modifier)
         (map shape->rect-shape)
-        (map resolve-rotation)
+        (map resolve-transformation)
         (map shape->rect-shape)))
 
 (defn selection-rect
@@ -753,8 +761,28 @@
          frame-ds-modifier (:displacement-modifier frame)
          rt-modifier (:rotation-modifier shape)]
      (cond-> shape
-       (gmt/matrix? rz-modifier) (transform rz-modifier)
+       ; (gmt/matrix? rz-modifier) (transform rz-modifier)
        frame (move (gpt/point (- (:x frame)) (- (:y frame))))
        (gmt/matrix? frame-ds-modifier) (transform frame-ds-modifier)
        (gmt/matrix? ds-modifier) (transform ds-modifier)
        rt-modifier (update :rotation #(+ (or % 0) rt-modifier))))))
+
+
+(defn transform-matrix
+  ([{:keys [x y] :as shape}]
+   (let [center (gpt/center shape)
+         resize (or (:resize-modifier shape) (gmt/matrix))
+         rotation (or (:rotation shape) 0)
+         _ (.log js/console (clj->js resize))
+         resize-transform
+         (-> (gmt/matrix)
+             (gmt/translate (gpt/point x y))
+             (gmt/multiply resize)
+             (gmt/translate (gpt/negate (gpt/point x y))))
+
+         transformed-center (gpt/transform center resize-transform)
+         transform
+         (-> (gmt/matrix)
+             (gmt/rotate rotation transformed-center)
+             (gmt/multiply resize-transform))]
+     transform)))
