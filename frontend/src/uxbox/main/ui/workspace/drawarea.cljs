@@ -127,7 +127,7 @@
                   delta (gpt/subtract point initial)
                   {scale-x :x scale-y :y} (gpt/divide (gpt/add vs delta) vs)
                   _ (.log js/console "SCALE" (clj->js [scale-x scale-y]))
-                  mtx (geom/generate-resize-matrix :bottom-right shape' nil [scale-x scale-y])
+                  mtx (geom/generate-resize-matrix :bottom-right shape' nil 0 [scale-x scale-y])
                   _ (.log js/console "MTX" (clj->js mtx))
                   ]
               (assoc shape :resize-modifier mtx)))
@@ -277,16 +277,14 @@
         (rx/concat
          (rx/of dw/clear-drawing)
          (when (::initialized? shape)
-           (let [] #_[modifier (:resize-modifier shape)
-                      shape (if (gmt/matrix? modifier)
-                              (geom/transform shape modifier)
-                              shape)
-                      shape (dissoc shape ::initialized? :resize-modifier)]
-             ;; Add & select the created shape to the workspace
-             (rx/of dw/deselect-all
-                    (if (= :frame (:type shape))
-                      (dw/add-frame shape)
-                      (dw/add-shape shape))))))))))
+           (let [shape (-> shape
+                              (geom/transform-shape)
+                              (dissoc shape ::initialized?))]
+                ;; Add & select the created shape to the workspace
+                (rx/of dw/deselect-all
+                       (if (= :frame (:type shape))
+                         (dw/add-frame shape)
+                         (dw/add-shape shape))))))))))
 
 (def close-drawing-path
   (ptk/reify ::close-drawing-path

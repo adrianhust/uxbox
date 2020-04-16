@@ -303,7 +303,7 @@
   and the scale factor vector. The shape should be of rect-like type.
 
   Mainly used by drawarea and shape resize on workspace."
-  [vid shape frame [scalex scaley]]
+  [vid shape frame angle [scalex scaley]]
   (let [[cor-x cor-y] (get-vid-coords vid)
         {:keys [x y width height rotation]} shape
         center (gpt/center shape)
@@ -312,7 +312,7 @@
 
     (-> #_(or (:resize-modifier shape) (gmt/matrix))
         (gmt/matrix)
-        (gmt/scale (gpt/point scalex 1)))
+        (gmt/scale (gpt/point scalex scaley)))
 
     #_(gmt/scale-matrix (gpt/point scalex scaley))
     #_(-> (gmt/matrix)
@@ -754,14 +754,35 @@
     (overlaps? shape selrect)))
 
 (defn transform-shape
+  "Transform the shape properties given the modifiers"
   ([shape] (transform-shape nil shape))
-  ([frame shape]
-   (let [ds-modifier (:displacement-modifier shape)
-         rz-modifier (:resize-modifier shape)
-         frame-ds-modifier (:displacement-modifier frame)
-         rt-modifier (:rotation-modifier shape)]
-     (cond-> shape
-       ; (gmt/matrix? rz-modifier) (transform rz-modifier)
+  ([frame {:keys [x y] :as shape}]
+   (let [ds-modifier (:displacement-modifier shape (gmt/matrix))
+         frame-ds-modifier (:displacement-modifier frame (gmt/matrix))
+         rt-modifier (:rotation-modifier shape 0)
+         rotation (+ (:rotation shape 0) rt-modifier)
+
+         resize (:resize-modifier shape (gmt/matrix))
+         origin (gpt/point x y)
+
+         resize-transform (->
+                           (gmt/matrix)
+                           (gmt/translate origin)
+                           (gmt/multiply resize)
+                           (gmt/translate (gpt/negate origin)))
+         ]
+
+     (-> shape
+         (transform resize-transform)
+         (transform ds-modifier)
+         (assoc :rotation rotation)
+         (dissoc :displacement-modifier)
+         (dissoc :resize-modifier)
+         (dissoc :rotation-modifier))
+
+     
+     #_(cond-> shape
+       (gmt/matrix? rz-modifier) (transform rz-modifier)
        frame (move (gpt/point (- (:x frame)) (- (:y frame))))
        (gmt/matrix? frame-ds-modifier) (transform frame-ds-modifier)
        (gmt/matrix? ds-modifier) (transform ds-modifier)
@@ -769,20 +790,30 @@
 
 
 (defn transform-matrix
+  "Returns a transformation matrix without changing the shape properties.
+  The result should be used in a `transform` attribute in svg"
   ([{:keys [x y] :as shape}]
    (let [center (gpt/center shape)
-         resize (or (:resize-modifier shape) (gmt/matrix))
+         resize (:resize-modifier shape (gmt/matrix))
          rotation (or (:rotation shape) 0)
-         _ (.log js/console (clj->js resize))
-         resize-transform
-         (-> (gmt/matrix)
-             (gmt/translate (gpt/point x y))
-             (gmt/multiply resize)
-             (gmt/translate (gpt/negate (gpt/point x y))))
+         tmp (gmt/rotate-matrix rotation center)
+         _ (println "-------")
+         origin (gpt/point x y)
+         origin-rotated (gpt/transform origin tmp)
+         _ (println "[TM] Origin" x y center origin)
+         _ (println "WTF" rotation tmp)
+         resize-transform (-> (gmt/matrix)
+                              #_(gmt/translate origin)
+                              (gmt/multiply resize)
+                              #_(gmt/translate (gpt/negate origin)))
 
          transformed-center (gpt/transform center resize-transform)
-         transform
-         (-> (gmt/matrix)
-             (gmt/rotate rotation transformed-center)
-             (gmt/multiply resize-transform))]
-     transform)))
+
+         _ (println "[TM] Resize" resize-transform)
+         transform-matrix (-> (gmt/matrix)
+                              #_(gmt/multiply resize-transform)
+                              (gmt/rotate rotation center)
+                              )
+         _ (println "[TM] Result" transform-matrix)]
+     transform-matrix)))
+

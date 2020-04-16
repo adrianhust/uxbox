@@ -56,24 +56,24 @@
   (Matrix. x 0 0 y 0 0))
 
 (defn rotate-matrix
-  [a]
-  (let [a (mth/radians a)]
-    (Matrix. (mth/cos a)
-             (mth/sin a)
-             (- (mth/sin a))
-             (mth/cos a)
-             0
-             0)))
+  ([angle point] (multiply (translate-matrix point)
+                           (rotate-matrix angle)
+                           (translate-matrix (gpt/negate point))))
+  ([angle]
+   (let [a (mth/radians angle)]
+     (Matrix. (mth/cos a)
+              (mth/sin a)
+              (- (mth/sin a))
+              (mth/cos a)
+              0
+              0))))
 
 (defn rotate
   "Apply rotation transformation to the matrix."
   ([m angle]
    (multiply m (rotate-matrix angle)))
   ([m angle center]
-   (multiply m
-             (translate-matrix center)
-             (rotate-matrix angle)
-             (translate-matrix (gpt/negate center)))))
+   (multiply m (rotate-matrix angle center))))
 
 (defn scale
   "Apply scale transformation to the matrix."
@@ -118,4 +118,5 @@
               (* ky' (Math/sin rad)))
         dy (+ (* (- s3) (* ky' (- 1 (Math/cos rad))))
               (* kx' (Math/sin rad)))]
-    (gpt/point (* s1 dx) (* s2 dy))))
+    (translate-matrix
+     (gpt/point (* s1 dx) (* s2 dy)))))

@@ -42,13 +42,36 @@
             (let [frame (get objects (:frame-id shape))
                   ;; result (geom/resize-shape vid shape initial point lock?)
                   ;; scale (geom/calculate-scale-ratio shape result)
-                  shape (geom/transform shape (or (:resize-modifier shape) (gmt/matrix)))
-                  vs (gpt/point (:width shape) (:height shape))
-                  delta (gpt/subtract point initial)
-                  {scale-x :x scale-y :y} (gpt/divide (gpt/add vs delta) vs)
-                  resize-matrix (geom/generate-resize-matrix vid shape frame [scale-x scale-y])
-                  displacement-matrix (gmt/matrix)
-                  _ (println "MTX" resize-matrix)]
+                  {:keys [width height rotation]} shape
+                  p (fn [ss it] (println ss it) it)
+
+                  center (gpt/center shape)
+
+                  shapev (-> (gpt/point width height)
+                             (gpt/transform  (gmt/rotate-matrix (- rotation)))) 
+                  _ (println "Points" point initial)
+
+                  
+                  
+                  deltav (as->(p " > 1" (gpt/subtract point initial)) $
+                           (p " > 2" (gpt/transform $ (gmt/rotate-matrix (- rotation))))
+                           (p " > 3" (gpt/multiply $ (gpt/point 1.0 0.0)))
+                           #_(p " > 4" (gpt/transform $ (gmt/rotate-matrix rotation))))
+                 
+                  {scalex :x scaley :y :as scalev} (gpt/divide (gpt/add shapev deltav) shapev)
+                  _ (println "Shapev" shapev)
+                  _ (println "Delta" deltav)
+                  _ (println "Scale" scalev)
+                  
+                  resize-matrix (geom/generate-resize-matrix vid shape frame rotation [scalex scaley])
+                  rotation (:rotation shape)
+                  displacement-matrix (gmt/correct-rotation vid width height scalex scaley rotation)
+                  _ (println "Resize" resize-matrix)
+                  _ (println "Resize 2" (-> (gmt/matrix)
+                                            (gmt/rotate rotation)
+                                            (gmt/multiply resize-matrix)
+                                            (gmt/rotate  (- rotation))))
+                  _ (println "Displacement" resize-matrix)]
               (rx/of (assoc-resize-modifier-in-bulk ids resize-matrix displacement-matrix))))
 
           ;; Unifies the instantaneous proportion lock modifier
@@ -81,6 +104,61 @@
                 (rx/take-until stoper))
            (rx/of (materialize-resize-modifier-in-bulk ids))))))))
 
+(defn assoc-resize-modifier-in-bulk
+  [ids resize-matrix displacement-matrix]
+  (us/verify ::set-of-uuid ids)
+  (us/verify gmt/matrix? resize-matrix)
+  (us/verify gmt/matrix? displacement-matrix)
+  (ptk/reify ::assoc-resize-modifier-in-bulk
+    ptk/UpdateEvent
+    (update [_ state]
+      (let [page-id (:page-id state)
+            objects (get-in state [:workspace-data page-id :objects])
+            rfn #(-> %1
+                     (assoc-in [:workspace-data page-id :objects %2 :resize-modifier] resize-matrix)
+                     (assoc-in [:workspace-data page-id :objects %2 :displacement-modifier] displacement-matrix))
+            ;; TODO: REMOVE FRAMES FROM IDS TO PROPAGATE
+            ids-with-children (concat ids (mapcat #(helpers/get-children % objects) ids))]
+        (reduce rfn state ids-with-children)))))
+
+(defn materialize-resize-modifier-in-bulk
+  [ids]
+  (ptk/reify ::materialize-resize-modifier-in-bulk
+
+    IUpdateGroup
+    (get-ids [_] ids)
+
+    ptk/UpdateEvent
+    (update [_ state]
+      (let [page-id (:page-id state)
+            objects (get-in state [:workspace-data page-id :objects])
+
+            ;; Updates the resize data for a single shape
+            materialize-shape
+            (fn [state id]
+              (update-in state [:workspace-data page-id :objects id] geom/transform-shape))
+
+            ;; Applies materialize-shape over shape children
+            materialize-children
+            (fn [state id]
+              (reduce materialize-shape state (helpers/get-children id objects)))
+
+            ;; For each shape makes permanent the displacemnt
+            update-shapes
+            (fn [state id]
+              (let [shape (-> (get objects id) geom/transform-shape)]
+                (-> state
+                    (materialize-shape id)
+                    (materialize-children id))))]
+
+        #_state
+        (reduce update-shapes state ids)))
+
+    ptk/WatchEvent
+    (watch [_ state stream]
+      (let [page-id (:page-id state)]
+        (rx/of (common/diff-and-commit-changes page-id)
+               (common/rehash-shape-frame-relationship ids))))))
 
 
 ;; -- ROTATE
@@ -367,73 +445,4 @@
         (reduce materialize-shape state shapes)))))
 
 
-(defn assoc-resize-modifier-in-bulk
-  [ids resize displacement]
-  (us/verify ::set-of-uuid ids)
-  (us/verify gmt/matrix? resize)
-  (us/verify gmt/matrix? displacement)
-  (ptk/reify ::assoc-resize-modifier-in-bulk
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (:uxbox.main.data.workspace/page-id state)
-            objects (get-in state [:workspace-data page-id :objects])
-            rfn #(-> %1
-                     (assoc-in [:workspace-data page-id :objects %2 :resize-modifier] resize)
-                     (assoc-in [:workspace-data page-id :objects %2 :displacement-modifier] displacement))
-            ;; TODO: REMOVE FRAMES FROM IDS TO PROPAGATE
-            ids-with-children (concat ids (mapcat #(helpers/get-children % objects) ids))]
-        (reduce rfn state ids-with-children)))))
-
-(defn materialize-resize-modifier-in-bulk
-  [ids]
-  (ptk/reify ::materialize-resize-modifier-in-bulk
-    IBatchedChange
-
-    IUpdateGroup
-    (get-ids [_] ids)
-
-    ptk/UpdateEvent
-    (update [_ state]
-      (let [page-id (:page-id state)
-            objects (get-in state [:workspace-data page-id :objects])
-
-            ;; Updates the resize data for a single shape
-            materialize-shape
-            (fn [state id mtx]
-              (update-in
-               state
-               [:workspace-data page-id :objects id]
-               #(-> %
-                    (dissoc :resize-modifier)
-                    (geom/transform mtx))))
-
-            ;; Applies materialize-shape over shape children
-            materialize-children
-            (fn [state id mtx]
-              (reduce #(materialize-shape %1 %2 mtx) state (helpers/get-children id objects)))
-
-            ;; For each shape makes permanent the displacemnt
-            update-shapes
-            (fn [state id]
-              (let [{:keys [x y] :as shape} (get objects id)
-                    mtx (->
-                         (gmt/matrix)
-                         (gmt/translate (gpt/point x y))
-                         (gmt/multiply (:resize-modifier shape (gmt/matrix)))
-                         (gmt/translate (gpt/negate (gpt/point x y))))]
-                (if (= (:type shape) :frame)
-                  (materialize-shape state id mtx)
-                  (-> state
-                      (materialize-shape id mtx)
-                      (materialize-children id mtx)))))]
-
-        state
-        (as-> state $
-          (reduce update-shapes $ ids))))
-
-    ptk/WatchEvent
-    (watch [_ state stream]
-      (let [page-id (:page-id state)]
-        (rx/of (common/diff-and-commit-changes page-id)
-               (common/rehash-shape-frame-relationship ids))))))
 
