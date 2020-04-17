@@ -411,7 +411,6 @@
                                    (ptk/type? ::initialize-page %))
                               stream)
             notifier (->> stream
-                          (rx/tap #(println "!!!" (ptk/type %) (ptk/type? ::common/commit-changes %)))
                           (rx/filter (ptk/type? ::common/commit-changes))
                           (rx/debounce 2000)
                           (rx/merge stoper))]

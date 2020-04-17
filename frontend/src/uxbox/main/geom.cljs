@@ -20,6 +20,12 @@
 (declare move-path)
 (declare move-circle)
 
+(defn- _chk
+  "Function that checks if a number is nil or nan. Will return 0 when not
+  valid and the number otherwise."
+  [v]
+  (if (or (not v) (mth/nan? v)) 0 v))
+
 (defn move
   "Move the shape relativelly to its current
   position applying the provided delta."
@@ -41,16 +47,16 @@
   for rect-like shapes."
   [shape {dx :x dy :y}]
   (assoc shape
-         :x (mth/round (+ (:x shape) dx))
-         :y (mth/round (+ (:y shape) dy))))
+         :x (mth/round (+ (_chk (:x shape)) (_chk dx)))
+         :y (mth/round (+ (_chk (:y shape)) (_chk dy)))))
 
 (defn- move-circle
   "A specialized function for relative movement
   for circle shapes."
   [shape {dx :x dy :y}]
   (assoc shape
-         :cx (mth/round (+ (:cx shape) dx))
-         :cy (mth/round (+ (:cy shape) dy))))
+         :cx (mth/round (+ (_chk (:cx shape)) (_chk dx)))
+         :cy (mth/round (+ (_chk (:cy shape)) (_chk dy)))))
 
 (defn- move-path
   "A specialized function for relative movement
@@ -91,16 +97,16 @@
   "A specialized function for absolute moviment
   for rect-like shapes."
   [shape {:keys [x y] :as pos}]
-  (let [dx (if x (- x (:x shape)) 0)
-        dy (if y (- y (:y shape)) 0)]
+  (let [dx (- (_chk x) (_chk (:x shape)))
+        dy (- (_chk y) (_chk (:y shape)))]
     (move shape (gpt/point dx dy))))
 
 (defn- absolute-move-circle
   "A specialized function for absolute moviment
   for rect-like shapes."
   [shape {:keys [x y] :as pos}]
-  (let [dx (if x (- x (:cx shape)) 0)
-        dy (if y (- y (:cy shape)) 0)]
+  (let [dx (- (_chk x) (_chk (:cx shape)))
+        dy (- (_chk y) (_chk (:cy shape)))]
     (move shape (gpt/point dx dy))))
 
 ;; --- Rotation
@@ -303,7 +309,7 @@
   and the scale factor vector. The shape should be of rect-like type.
 
   Mainly used by drawarea and shape resize on workspace."
-  [vid shape frame angle [scalex scaley]]
+  [vid shape frame rotation [scalex scaley]]
   (let [[cor-x cor-y] (get-vid-coords vid)
         {:keys [x y width height rotation]} shape
         center (gpt/center shape)
@@ -508,7 +514,6 @@
 
 (defn- transform-rect
   [{:keys [x y width height] :as shape} mx]
-  (.log js/console "TRANSFORM" (clj->js shape) (clj->js transform-rect))
   (let [tl (gpt/transform (gpt/point x y) mx)
         tr (gpt/transform (gpt/point (+ x width) y) mx)
         bl (gpt/transform (gpt/point x (+ y height)) mx)
@@ -753,6 +758,45 @@
                  :type :rect}]
     (overlaps? shape selrect)))
 
+(defn transform-selrect
+  [frame {:keys [x y] :as shape}]
+  (let [ds-modifier (:displacement-modifier shape (gmt/matrix))
+        frame-ds-modifier (:displacement-modifier frame (gmt/matrix))
+        rt-modifier (:rotation-modifier shape 0)
+        rotation (+ (:rotation shape 0) rt-modifier)
+
+        resize (:resize-modifier shape (gmt/matrix))
+        center (gpt/center shape)
+
+        delta-rotation (- (:rotation shape) (:resize-modifier-rotation shape))
+        resize-for-angle
+        (fn [{:keys [x y] :as shape} angle]
+          (let [origin (gpt/point x y)
+                origin-rotated (gpt/transform origin (gmt/rotate-matrix (- angle) center))]
+            (->
+             (gmt/matrix)
+             (gmt/multiply (gmt/rotate-matrix angle center))
+             (gmt/translate origin-rotated)
+             (gmt/multiply resize)
+             (gmt/translate (gpt/negate origin-rotated))
+             (gmt/multiply (gmt/rotate-matrix (- angle) center)))))
+        
+        
+        shape' (-> shape
+                   (transform (resize-for-angle shape delta-rotation))
+                   (transform ds-modifier)
+                   (assoc :rotation rotation)
+                   (dissoc :displacement-modifier)
+                   (dissoc :resize-modifier)
+                   (dissoc :rotation-modifier))
+        selrect' (selection-rect [shape'])
+
+        selrect (selection-rect [(dissoc shape :resize-modifier :displacement-modifier)])
+        mtx (resize-for-angle selrect (:resize-modifier-rotation shape))
+        selrect (transform selrect mtx)]
+
+    selrect))
+
 (defn transform-shape
   "Transform the shape properties given the modifiers"
   ([shape] (transform-shape nil shape))
@@ -763,23 +807,39 @@
          rotation (+ (:rotation shape 0) rt-modifier)
 
          resize (:resize-modifier shape (gmt/matrix))
+         center (gpt/center shape)
          origin (gpt/point x y)
 
-         resize-transform (->
-                           (gmt/matrix)
-                           (gmt/translate origin)
-                           (gmt/multiply resize)
-                           (gmt/translate (gpt/negate origin)))
-         ]
+         delta-rotation (- (:rotation shape) (:resize-modifier-rotation shape))
+         resize-for-angle
+         (fn [angle]
+           (let [origin-rotated (gpt/transform origin (gmt/rotate-matrix (- angle) center))]
+             (->
+              (gmt/matrix)
+              (gmt/multiply (gmt/rotate-matrix angle center))
+              (gmt/translate origin-rotated)
+              (gmt/multiply resize)
+              (gmt/translate (gpt/negate origin-rotated))
+              (gmt/multiply (gmt/rotate-matrix (- angle) center)))))
+         
+        
+         shape' (-> shape
+                    (transform (resize-for-angle delta-rotation))
+                    (transform ds-modifier)
+                    (assoc :rotation rotation)
+                    (dissoc :displacement-modifier)
+                    (dissoc :resize-modifier)
+                    (dissoc :rotation-modifier))
 
-     (-> shape
-         (transform resize-transform)
-         (transform ds-modifier)
-         (assoc :rotation rotation)
-         (dissoc :displacement-modifier)
-         (dissoc :resize-modifier)
-         (dissoc :rotation-modifier))
+         {:keys [width height] :as selrect} (transform (selection-rect [shape])
+                                                       (resize-for-angle (:resize-modifier-rotation shape)))
+         {width' :width height' :height :as selrect'} (selection-rect [shape'])
+         {scalex :x scaley :y} (gpt/divide (gpt/point width height) (gpt/point width' height'))]
+  
 
+     (-> shape'
+         #_(assoc :stretch (gmt/scale-matrix (gpt/point scalex scaley)
+                                           (gpt/center selrect))))
      
      #_(cond-> shape
        (gmt/matrix? rz-modifier) (transform rz-modifier)
@@ -797,11 +857,8 @@
          resize (:resize-modifier shape (gmt/matrix))
          rotation (or (:rotation shape) 0)
          tmp (gmt/rotate-matrix rotation center)
-         _ (println "-------")
          origin (gpt/point x y)
          origin-rotated (gpt/transform origin tmp)
-         _ (println "[TM] Origin" x y center origin)
-         _ (println "WTF" rotation tmp)
          resize-transform (-> (gmt/matrix)
                               #_(gmt/translate origin)
                               (gmt/multiply resize)
@@ -809,11 +866,9 @@
 
          transformed-center (gpt/transform center resize-transform)
 
-         _ (println "[TM] Resize" resize-transform)
          transform-matrix (-> (gmt/matrix)
                               #_(gmt/multiply resize-transform)
-                              (gmt/rotate rotation center)
-                              )
-         _ (println "[TM] Result" transform-matrix)]
+                              (gmt/multiply (:stretch shape (gmt/matrix)))
+                              (gmt/rotate rotation center))]
      transform-matrix)))
 

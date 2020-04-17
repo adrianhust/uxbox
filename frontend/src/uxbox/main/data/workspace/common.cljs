@@ -91,7 +91,6 @@
 
      ptk/UpdateEvent
      (update [_ state]
-       (println "CHANGES" changes)
        (let [page-id (:page-id state)
              state (update-in state [:pages-data page-id] cp/process-changes changes)]
          (cond-> state

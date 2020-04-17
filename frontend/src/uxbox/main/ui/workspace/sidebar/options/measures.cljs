@@ -59,7 +59,7 @@
                           (dom/get-value)
                           (d/parse-integer 0))
                 ; Convert back to absolute position before update
-                abs-value (+ value (attr parent))]
+                abs-value (+ value (attr parent 0))]
             (st/emit! (udw/update-position (:id shape) {attr abs-value}))))
 
         on-rotation-change

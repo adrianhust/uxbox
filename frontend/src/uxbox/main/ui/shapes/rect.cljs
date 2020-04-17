@@ -30,9 +30,15 @@
                          #(common/on-mouse-down % shape))
         on-context-menu (mf/use-callback
                          (mf/deps shape)
-                         #(common/on-context-menu % shape))]
+                         #(common/on-context-menu % shape))
+        selrect (geom/transform-selrect frame shape)]
     [:g.shape {:on-mouse-down on-mouse-down
                :on-context-menu on-context-menu}
+     [:rect  {:x (:x selrect)
+              :y (:y selrect)
+              :width (:width selrect)
+              :height (:height selrect)
+              :style {:stroke "red" :fill "transparent" :stroke-width "1px" :stroke-opacity 0.2}}]
      [:& rect-shape {:shape (geom/transform-shape frame shape) }]]))
 
 ;; --- Rect Shape

@@ -43,36 +43,23 @@
                   ;; result (geom/resize-shape vid shape initial point lock?)
                   ;; scale (geom/calculate-scale-ratio shape result)
                   {:keys [width height rotation]} shape
-                  p (fn [ss it] (println ss it) it)
 
                   center (gpt/center shape)
 
                   shapev (-> (gpt/point width height)
                              (gpt/transform  (gmt/rotate-matrix (- rotation)))) 
-                  _ (println "Points" point initial)
-
                   
-                  
-                  deltav (as->(p " > 1" (gpt/subtract point initial)) $
-                           (p " > 2" (gpt/transform $ (gmt/rotate-matrix (- rotation))))
-                           (p " > 3" (gpt/multiply $ (gpt/point 1.0 0.0)))
-                           #_(p " > 4" (gpt/transform $ (gmt/rotate-matrix rotation))))
+                  deltav (-> (gpt/subtract point initial)
+                             (gpt/transform (gmt/rotate-matrix (- rotation)))
+                             (gpt/multiply (gpt/point 1.0 0.0))
+                             #_(gpt/transform $ (gmt/rotate-matrix rotation)))
                  
                   {scalex :x scaley :y :as scalev} (gpt/divide (gpt/add shapev deltav) shapev)
-                  _ (println "Shapev" shapev)
-                  _ (println "Delta" deltav)
-                  _ (println "Scale" scalev)
                   
                   resize-matrix (geom/generate-resize-matrix vid shape frame rotation [scalex scaley])
-                  rotation (:rotation shape)
-                  displacement-matrix (gmt/correct-rotation vid width height scalex scaley rotation)
-                  _ (println "Resize" resize-matrix)
-                  _ (println "Resize 2" (-> (gmt/matrix)
-                                            (gmt/rotate rotation)
-                                            (gmt/multiply resize-matrix)
-                                            (gmt/rotate  (- rotation))))
-                  _ (println "Displacement" resize-matrix)]
-              (rx/of (assoc-resize-modifier-in-bulk ids resize-matrix displacement-matrix))))
+
+                  displacement-matrix (gmt/correct-rotation vid width height scalex scaley rotation)]
+              (rx/of (assoc-resize-modifier-in-bulk ids resize-matrix displacement-matrix rotation))))
 
           ;; Unifies the instantaneous proportion lock modifier
           ;; activated by Ctrl key and the shapes own proportion
@@ -105,7 +92,7 @@
            (rx/of (materialize-resize-modifier-in-bulk ids))))))))
 
 (defn assoc-resize-modifier-in-bulk
-  [ids resize-matrix displacement-matrix]
+  [ids resize-matrix displacement-matrix rotation]
   (us/verify ::set-of-uuid ids)
   (us/verify gmt/matrix? resize-matrix)
   (us/verify gmt/matrix? displacement-matrix)
@@ -116,6 +103,7 @@
             objects (get-in state [:workspace-data page-id :objects])
             rfn #(-> %1
                      (assoc-in [:workspace-data page-id :objects %2 :resize-modifier] resize-matrix)
+                     (assoc-in [:workspace-data page-id :objects %2 :resize-modifier-rotation] rotation)
                      (assoc-in [:workspace-data page-id :objects %2 :displacement-modifier] displacement-matrix))
             ;; TODO: REMOVE FRAMES FROM IDS TO PROPAGATE
             ids-with-children (concat ids (mapcat #(helpers/get-children % objects) ids))]
@@ -169,11 +157,8 @@
     (watch [_ state stream]
       (let [stoper (rx/filter ms/mouse-up? stream)
             group  (geom/selection-rect shapes)
-            _ (.log js/console "GROUP" (clj->js group))
             group-center (gpt/center group)
-            _ (.log js/console "CENTER" (clj->js group-center))
             initial-angle (gpt/angle @ms/mouse-position group-center)
-            _ (.log js/console "INITIAL" (clj->js initial-angle))
             calculate-angle (fn [pos ctrl?]
                               (let [angle (- (gpt/angle pos group-center) initial-angle)
                                     angle (if (neg? angle) (+ 360 angle) angle)

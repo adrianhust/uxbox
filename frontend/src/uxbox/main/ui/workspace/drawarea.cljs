@@ -119,17 +119,13 @@
 
           (resize-shape [shape initial point lock?]
             (let [shape' (geom/shape->rect-shape shape)
-                  _ (.log js/console "Shape'" (clj->js shape'))
                   ;; result (geom/resize-shape :bottom-right shape' initial point lock?)
                   ;; scale (geom/calculate-scale-ratio shape' result)
                   ;; mtx (geom/generate-resize-matrix :bottom-right shape' nil scale)
                   vs (gpt/point (:width shape') (:height shape'))
                   delta (gpt/subtract point initial)
                   {scale-x :x scale-y :y} (gpt/divide (gpt/add vs delta) vs)
-                  _ (.log js/console "SCALE" (clj->js [scale-x scale-y]))
-                  mtx (geom/generate-resize-matrix :bottom-right shape' nil 0 [scale-x scale-y])
-                  _ (.log js/console "MTX" (clj->js mtx))
-                  ]
+                  mtx (geom/generate-resize-matrix :bottom-right shape' nil 0 [scale-x scale-y])]
               (assoc shape :resize-modifier mtx)))
 
           (update-drawing [state initial point lock?]

@@ -177,15 +177,18 @@
                   :on-resize on-resize
                   :on-rotate on-rotate}]))
 
+(defonce ^:dynamic *debug* (atom false))
 (mf/defc single-selection-handlers
   [{:keys [shape zoom objects] :as props}]
-  (let [shape (geom/transform-shape shape)
+  (let [shape-id (:id shape)
+        shape (geom/transform-shape shape)
+        shape' (if (deref *debug*) (geom/selection-rect [shape]) shape)
         on-resize #(do (dom/stop-propagation %2)
-                       (st/emit! (dw/start-resize %1 #{(:id shape)} shape objects)))
+                       (st/emit! (dw/start-resize %1 #{shape-id} shape' objects)))
         on-rotate #(do (dom/stop-propagation %)
                        (st/emit! (dw/start-rotate [shape])))]
 
-    [:& controls {:shape shape
+    [:& controls {:shape shape'
                   :zoom zoom
                   :on-rotate on-rotate
                   :on-resize on-resize}]))

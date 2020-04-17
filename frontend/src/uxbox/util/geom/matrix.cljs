@@ -51,9 +51,13 @@
   (Matrix. 1 0 0 1 x y))
 
 (defn scale-matrix
-  [{x :x y :y :as pt}]
-  (assert (gpt/point? pt))
-  (Matrix. x 0 0 y 0 0))
+  ([pt center]
+   (multiply (translate-matrix center)
+             (scale-matrix pt)
+             (translate-matrix (gpt/negate center))))
+  ([{x :x y :y :as pt}]
+   (assert (gpt/point? pt))
+   (Matrix. x 0 0 y 0 0)))
 
 (defn rotate-matrix
   ([angle point] (multiply (translate-matrix point)
@@ -77,12 +81,10 @@
 
 (defn scale
   "Apply scale transformation to the matrix."
-  ([m scale] (multiply m (scale-matrix scale)))
+  ([m scale]
+   (multiply m (scale-matrix scale)))
   ([m scale center]
-   (multiply m
-             (translate-matrix center)
-             (scale-matrix scale)
-             (translate-matrix (gpt/negate center)))))
+   (multiply m (scale-matrix scale center))))
 
 (defn translate
   "Apply translate transformation to the matrix."
